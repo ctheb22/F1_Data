@@ -1,5 +1,3 @@
-import matplotlib
-matplotlib.use("QtAgg")
 
 class DataCleaner:
     def remove_invalid_lap_times(self, df):
