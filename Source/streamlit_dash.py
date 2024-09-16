@@ -1,8 +1,8 @@
 import streamlit as st
 import pandas as pd
 
-from Source.data_import import DataUtility
-from Source.data_cleaner import DataCleaner
+from data_import import DataUtility
+from data_cleaner import DataCleaner
 
 di = DataUtility()
 dc = DataCleaner()
