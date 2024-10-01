@@ -133,6 +133,7 @@ class DataUtility:
     def clean_df(self, df):
         # remove stints/laps where the tire compound is marked as "unknown"
         df = df.loc[df['compound'].isin(['SOFT', 'HARD', 'MEDIUM', 'INTERMEDIATE', 'WET'])]
+        # remove sprint sessions.
         df = df.loc[df['session_name'] == 'Race']
         return df
 
@@ -151,7 +152,7 @@ class DataUtility:
     def get_all_laps_and_sessions_per_year_df(self, year):
         '''
         :param year: the year we're interested in.
-        :return: lapdf of all laps for races and sprints for the given year, sessiondf containing all metadata for a all sessions (race/sprints)
+        :return: lapdf of all laps for races and sprints for the given year, sessiondf containing all metadata for all sessions (race/sprints)
         '''
 
         cached_laps_path = f'Data/' + str(year) + '_laps_master.csv'
@@ -212,12 +213,24 @@ class DataUtility:
         sessiondf = sessiondf[['session_key','circuit_short_name','session_name','driver_number','stint_number',
                                'country_name','date_start','year','full_name','name_acronym','team_colour',
                                'team_name','compound','lap_end','lap_start','stint_length','tyre_age_at_start']]
-        sessiondf.rename(columns={'country_name': 'session_country', 'full_name':'driver_name', 'name_acronym':'driver_short',
-                          'tyre_age_at_start':'initial_tire_age', 'circuit_short_name':'track_name', 'date_start':'date'}, inplace=True)
 
-        lapdf.rename(columns={'date_start': 'date','duration_sector_1':'sector_1','duration_sector_2':'sector_2',
-                      'duration_sector_3':'sector_3','lap_duration':'lap_seconds','segments_sector_1':'s1_segs',
-                      'segments_sector_2':'s2_segs','segments_sector_3':'s3_segs'}, inplace=True)
+        sessiondf.rename(columns={'country_name': 'session_country',
+                                  'full_name':'driver_name',
+                                  'name_acronym':'driver_short',
+                                  'tyre_age_at_start':'initial_tire_age',
+                                  'circuit_short_name':'track_name',
+                                  'date_start':'date'},
+                         inplace=True)
+
+        lapdf.rename(columns={'date_start': 'date',
+                              'duration_sector_1':'sector_1',
+                              'duration_sector_2':'sector_2',
+                              'duration_sector_3':'sector_3',
+                              'lap_duration':'lap_seconds',
+                              'segments_sector_1':'s1_segs',
+                              'segments_sector_2':'s2_segs',
+                              'segments_sector_3':'s3_segs'},
+                     inplace=True)
 
 
         sessiondf.to_csv(cached_session_path, index=False)

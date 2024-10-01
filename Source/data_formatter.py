@@ -1,5 +1,7 @@
+import pandas as pd
 
-class DataCleaner:
+
+class DataFormatter:
     def remove_invalid_lap_times(self, df):
         """
         Function to remove invalid, excessively high lap times, as well as pit out laps and laps
@@ -23,16 +25,21 @@ class DataCleaner:
         sddf = sddf[['session_laps', 'valid_lap_threshold']]
         dfr = df.merge(sddf, on=['driver_name', 'session_key'])
 
-        #Set the total race laps per second. We have to assume this based on lap_number data. If less than 44 laps were completed (arbitrary) we assume the lap count is the average (57).
+        #Set the total race laps per session. We have to assume this based on lap_number data, since this is not retrievable from the endpoint.
+        # We find the maximum number of laps completed, which in almost all cases should be the total laps. Exceptions would be races that got rained out
+        # or hit the maximum race time midway through. In these cases, we still need to assume a reasonable total lap count, because we use it later on for
+        # calculating normalized lap times taking fuel weight into account.
+        # If less than 44 laps were completed (the shortest lap count) we assume the lap count is the average (and most common lap count), 57.
+        # There is certainly still the possibility of a race being rained out after 44 laps, and not getting the correct total laps, but this is a rare edge case that we ignore.
         dfs = dfr.groupby('session_key').agg({'session_laps': 'max'})
         dfs['total_session_laps'] = dfs['session_laps'].apply(lambda x: x if x > 44 else 57)
         dfr = dfr.merge(dfs, on=['session_key'])
 
         # Here we used the calculated outlier lap limit to mark a lap valid or not.
-        # We then use the collected lap validity column to find common invalid laps, and assume there was an event (yellow flag, etc..)
-        # That caused these specific laps to be slow for so many drivers. We mark these laps as 'field_slow_lap'.
+        # We then use the collected lap validity column to find common invalid laps, which might indicates an event (yellow flag, etc..)
+        # that caused these specific laps to be slow for multiple drivers. We use the 'field_valid_lap' column to mark these laps.
         # This is necessary because, while yellow flags slow the field considerably, some drivers still put in laps on occasion that
-        #   are below the outlier limit, so they don't get automatically marked invalid even though they should be.
+        #   are fast enough to not be filtered by the outlier limit, but are still affected by the slowing event.
         dfr['lap_validity'] = True
         dfr.loc[(dfr['lap_seconds'] >= dfr['valid_lap_threshold']) | (dfr['lap_seconds'].isnull()), 'lap_validity'] = False
         dfvs = dfr.groupby(['session_key', 'lap_number']).agg({'lap_validity': 'sum'})
@@ -40,12 +47,8 @@ class DataCleaner:
         dfvs = dfvs['field_valid_lap']
         dfr = dfr.merge(dfvs, on=['session_key', 'lap_number'])
 
-        # print(dfr[['track_name', 'session_name', 'driver_name', 'stint_number', 'valid_lap_threshold', 'lap_seconds',
-        #         'lap_number', 'lap_validity', 'field_valid_lap']]
-        #         .sort_values(by=['track_name', 'session_name', 'driver_name', 'stint_number', 'lap_number']))
-
         # We now have two columns on df for checking whether a lap is valid:
-        # if 'field_slow_lap' is True, something caused over 10 drivers to have a slow lap, so drop it
+        # if 'field_valid_lap' is False, something caused over 10 drivers to have a slow lap, so drop it
         #   (this driver may have had an acceptable time, but it's probably slower than normal due to the event and should be filtered)
         # if 'lap_validity' is False, automatically drop the lap
         #   (something specific to this driver caused them to have a slow lap, but it may not have affected any other cars)
@@ -58,18 +61,33 @@ class DataCleaner:
 
     def normalize_lap_times(self, df):
         """
-        Function attempting to normalize lap times, accounting for fuel consumption/weight.
+        Function attempting to normalize lap times, accounting for fuel consumption/weight, and lap length.
         :param df: df of lap times
         :return: ndf: new dataframe with additional column 'normalized_lap_seconds'
         """
         # Okay. It doesn't seem possible to estimate how much fuel loss affects times based on lap times alone. There are too many other factors affecting lap times.
-        # It sounds like the standard assumption is 110 kg of fuel spent linearly over the course of the lap, at a cost of .3 seconds/10kg of fuel.
+        # The standard assumption is 110 kg of fuel spent linearly over the course of the lap, at a cost of .3 seconds/10kg of fuel.
         # All races are roughly the same length (around 305-310 km, 44-80 laps, 57 average), meaning fuel efficiency is likely around 2.8 km/kg, and each kg costs about .03 seconds
-        # So for each race, we should do 110/laps = X kg/lap -> lap_time - (110 - (((110 / total_s_laps) * (lap_number - .5))) * .03)) = adjusted time.
+        # So for each race, we should:
+        # Find the remaining fuel in kg in the car for a given lap (normalizing the amount based on the half lap fuel number), multiply that by .03 seconds/kg,
+        # subtract the result from the recorded lap time. We subtract because we're calculating the chunk of extra seconds of lap time due to the fuel weight. We get this formula->
+        #   lap_time - (110 - (((110 / total_s_laps) * (lap_number - .5))) * .03)) = adjusted time.
 
-        #Doesn't account for
         ndf = df.copy()
         ndf['normalized_lap_seconds'] = ndf['lap_seconds'] - ((110 - ((110 / ndf['total_session_laps']) * (ndf['lap_number'] - .5))) * .03)
+
+        # Now we have normalized lap times. But can we go further?
+        # Let's try to normalize all lap times based on the average lap time.
+        # Basically, lets get the average lap time for a session for a driver, then for each lap calculate a percentage based on the lap time compared to the average.
+        # So if the average lap time for a session-driver is 100s, and the current lap time is 90s, then the normalized percentage would be ((90 - 100)/100) * 100 = -10%.
+        # Similarly, if the average time for a different race is 80s and the current lap time is 90s, we get a percentage of 12.5%.
+        # Now instead of seeing two identical 90s laps, we can see that the first lap is actually "faster" as a percentage difference from the average (-10% vs 12.5%).
+
+        ndfg = ndf.groupby(['session_key', 'driver_name']).agg({'normalized_lap_seconds':'mean'}).rename(columns={'normalized_lap_seconds': 'average_normalized_lap_seconds'})
+        ndf = ndf.merge(ndfg, on=['session_key', 'driver_name'])
+        #Keep in mind that a smaller ratio is "faster". Also helpful to remember that the closer to 1 a ratio is, the closer to the average time it is.
+        ndf['lap_time_percentage_compared_to_average'] = round(((ndf['normalized_lap_seconds'] - ndf['average_normalized_lap_seconds']) / ndf['average_normalized_lap_seconds']) * 100, 2)
+
         return ndf
 
 
@@ -77,8 +95,6 @@ class DataCleaner:
         """
         Function to analyze stint and compound combinations and build a new df of the data.
         :param full_df: full combined df of laps & stints
-        :param driver: scalar or list of driver numbers to fiter by. 'team' will be ignored if this is present.
-        :param team: scalar or list of team names to filter by. this param is ignored if 'driver' is specified.
         :return: dataframe grouped by stint and compound with extra analysis columns
         """
         # General static tire analysis (how many times each is used, average stint length, common stints for compound), laps/times are not used or considered.
@@ -87,8 +103,11 @@ class DataCleaner:
                      'session_key': (lambda x: x.value_counts().index[0]),
                      'compound' : (lambda x: x.value_counts().index[0])}))
 
+        colorMap = {'HARD': 'ghostwhite', 'MEDIUM': 'gold', 'SOFT': 'firebrick', 'INTERMEDIATE': 'seagreen', 'WET': 'royalblue'}
+
         cdf = ldf.groupby('compound').agg({'stint_length': 'sum', 'session_key': 'count'}).rename(columns={'session_key': 'compound_stint_count', 'stint_length': 'compound_laps'})
         cdf['average_compound_laps'] = cdf['compound_laps'] / cdf['compound_stint_count']
+        cdf['color'] = pd.Series(colorMap)
 
         sdf = ldf.groupby('stint_number').agg({'session_key':'count', 'stint_length':'mean'}).rename(columns={'session_key':'stint_count', 'stint_length':'avg_stint_length'})
         def get_final_stint_count(x):
@@ -103,6 +122,3 @@ class DataCleaner:
         scdf['average_compound_length_for_this_stint'] = scdf['compound_stint_laps']/scdf['compound_count_per_stint']
 
         return scdf, cdf, sdf
-
-# individual tire analysis: (normalized lap_times per lap in stint graph, times used per driver?, top 5 tracks where they're used), histogram graph of all laps where that compound is used.
-# driver analysis per compound: average stint on this compound, average falloff from first to final lap of stint, graph of all races where the compound was used, showing the number of laps and average lap times.
